@@ -28,10 +28,23 @@ import (
 
 var metricNameRegex = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 
-// MetricInjector is an HTTP handler that exposes Prometheus metric counters.
-// It works by defining one or more CounterMetric entries; each may include
-// an optional set of request matchers.  Requests that hit a matching metric
-// cause the associated counter to be incremented.
+// MetricInjector is a Caddy HTTP middleware module that defines and
+// increments custom Prometheus counters.
+//
+// The module allows defining one or more counters that are incremented when
+// incoming requests match configured Caddy HTTP request matchers.
+//
+// Each counter may define optional matcher conditions. If the matchers
+// evaluate to true for a request, the corresponding counter is incremented.
+// Counters without matchers act as match-all counters and increment for every
+// request passing through the handler.
+//
+// Counter evaluation occurs after the remaining handler chain has executed,
+// ensuring that metric collection does not interfere with request processing.
+//
+// All counters are registered in Caddy's metrics registry and become available
+// through the standard Prometheus metrics endpoint when the global `metrics`
+// option is enabled.
 type MetricInjector struct {
 	// Counters is the list of metrics that should be tracked.
 	Counters []*CounterMetric `json:"counters,omitempty"`
@@ -42,11 +55,11 @@ type MetricInjector struct {
 }
 
 type CounterMetric struct {
-	// Name is the Prometheus metric name.  It must be unique within the
+	// Name is the Prometheus metric name. It must be unique within the
 	// module configuration.
 	Name string `json:"name,omitempty"`
 
-	// Help is the help/description string for the metric.  A sensible default
+	// Help is the help/description string for the metric. A sensible default
 	// is generated if this is left empty.
 	Help string `json:"help,omitempty"`
 

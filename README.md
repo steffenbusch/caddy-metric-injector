@@ -1,6 +1,6 @@
 # Caddy Metric Injector Plugin
 
-The **Metric Injector** plugin for [Caddy](https://caddyserver.com) provides a minimalistic way to define and increment custom Prometheus counters directly within the HTTP handler chain.
+The **Metric Injector** plugin for [Caddy](https://caddyserver.com) provides a minimalistic way to define and increment custom Prometheus counters during HTTP request handling.
 
 It allows you to declaratively configure one or more counters and optionally bind them to Caddy request matchers. Each matching request increments the corresponding metric.
 
