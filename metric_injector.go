@@ -79,7 +79,7 @@ type CounterMetric struct {
 // CaddyModule returns the Caddy module information.
 func (MetricInjector) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.metric_counter",
+		ID:  "http.handlers.metric_injector",
 		New: func() caddy.Module { return new(MetricInjector) },
 	}
 }
