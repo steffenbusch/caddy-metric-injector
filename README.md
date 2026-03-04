@@ -9,6 +9,8 @@ Counters are evaluated after the remaining handler chain has executed, ensuring 
 This plugin is intended as a complement to Caddy’s built-in metrics.
 Metric Injector enables domain-specific counters tied to routing logic or matcher conditions that are not covered by the built-in metrics.
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/steffenbusch/caddy-metric-injector)](https://goreportcard.com/report/github.com/steffenbusch/caddy-metric-injector)
+
 ## Features
 
 This plugin introduces a middleware that:
