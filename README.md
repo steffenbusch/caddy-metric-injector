@@ -15,8 +15,9 @@ Metric Injector enables domain-specific counters tied to routing logic or matche
 
 This plugin introduces a middleware that:
 
-- Registers custom Prometheus `Counter` metrics via Caddy’s metrics registry.
+- Registers custom Prometheus `CounterVec` metrics via Caddy’s metrics registry.
 - Supports optional per-counter request matchers using Caddy’s native HTTP matchers.
+- Supports optional per-counter labels with dynamic values from request placeholders.
 - Increments counters only when matcher conditions are satisfied.
 - Treats counters without a `match` block as match-all (incremented for every request).
 - Counter evaluation occurs after the remaining handler chain has completed.
@@ -52,6 +53,7 @@ metric_injector {
     counter {
       name <prometheus-metric-name>
       help <help-text>
+      label <label-name> <value|placeholder> [<default-value>]
       match {
          <any Caddy HTTP request matcher>
       }
@@ -79,6 +81,10 @@ You must either:
 
 - `name` (required): Prometheus metric name. Must be unique within the configuration and follow Prometheus naming conventions.
 - `help` (optional): Help/description string. A default description is generated if omitted.
+- `label` (optional): Defines a Prometheus label. You can have multiple `label` lines.
+  - `<label-name>`: The name of the label.
+  - `<value>`: The value for the label. This can be a static string or a dynamic Caddy placeholder (e.g., `{http.request.method}`).
+  - `<default-value>` (optional): A fallback value if a placeholder resolves to an empty string. This is ignored if `<value>` is a static string. Defaults to `-`.
 - `match` (optional): Any Caddy HTTP request matcher (path, method, header, vars, etc.). If omitted, the counter increments for every request.
 
 ### Example
@@ -95,6 +101,8 @@ reporting.example.com:8080 {
     counter {
       name content_security_policy_reports_total
       help "How many CSP reports were received"
+      label origin {http.request.header.origin} "unknown"
+      label source "caddy"
       match {
         path /csp/*
       }
@@ -118,6 +126,15 @@ reporting.example.com:8080 {
 }
 ```
 
+> [!Important]
+> **A Note on Cardinality**
+>
+> While labels are a powerful feature, it is important to use them responsibly. Each unique combination of key-value pairs for labels creates a new time series in Prometheus, which can lead to high cardinality.
+>
+> Avoid using labels with unbounded or high-cardinality values, such as user IDs, session IDs, or full request paths if they are not parameterized. High cardinality can significantly increase memory usage and performance overhead on your Prometheus server.
+>
+> It is the user's responsibility to ensure that the configured labels do not lead to an explosion of metric series.
+
 ## Behavior
 
 - Each request is evaluated against all configured counters.
@@ -129,8 +146,7 @@ reporting.example.com:8080 {
 
 ## Current Limitations
 
-- Only Prometheus `Counter` metrics are supported.
-- No label support (no `CounterVec`, `GaugeVec`, etc.).
+- Only Prometheus `CounterVec` metrics are supported (no `Gauge`, `Histogram`, etc.).
 - Counters are incremented solely based on request matchers.
 - Response status codes, response headers, and response body data are not inspected.
 - Within a single `metric_injector` instance, all configured counters are evaluated for each request handled by that instance.

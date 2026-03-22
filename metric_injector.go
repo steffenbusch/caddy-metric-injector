@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -31,8 +32,9 @@ var metricNameRegex = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 // MetricInjector is a Caddy HTTP middleware module that defines and
 // increments custom Prometheus counters.
 //
-// The module allows defining one or more counters that are incremented when
-// incoming requests match configured Caddy HTTP request matchers.
+// The module allows defining one or more counters, with optional labels,
+// that are incremented when incoming requests match configured Caddy HTTP
+// request matchers.
 //
 // Each counter may define optional matcher conditions. If the matchers
 // evaluate to true for a request, the corresponding counter is incremented.
@@ -54,6 +56,17 @@ type MetricInjector struct {
 	logger *zap.Logger
 }
 
+type Label struct {
+	// Name is the Prometheus label name.
+	Name string `json:"name,omitempty"`
+
+	// Value is the placeholder to be evaluated for the label's value.
+	Value string `json:"value,omitempty"`
+
+	// Default is the value to be used if the placeholder is empty.
+	Default string `json:"default,omitempty"`
+}
+
 type CounterMetric struct {
 	// Name is the Prometheus metric name. It must be unique within the
 	// module configuration.
@@ -62,6 +75,9 @@ type CounterMetric struct {
 	// Help is the help/description string for the metric. A sensible default
 	// is generated if this is left empty.
 	Help string `json:"help,omitempty"`
+
+	// Labels is the list of labels for the metric.
+	Labels []*Label `json:"labels,omitempty"`
 
 	// MatcherSetsRaw holds the raw matcher configuration parsed from Caddyfile /
 	// JSON. It is exercise only during Provision; the concrete matcher sets are
@@ -72,8 +88,8 @@ type CounterMetric struct {
 	// request. It remains nil when no matchers were configured.
 	matcherSets caddyhttp.MatcherSets
 
-	// counter is the Prometheus Counter instance used at runtime.
-	counter prometheus.Counter
+	// counter is the Prometheus CounterVec instance used at runtime.
+	counter *prometheus.CounterVec
 }
 
 // CaddyModule returns the Caddy module information.
@@ -125,15 +141,17 @@ func (m *MetricInjector) Provision(ctx caddy.Context) error {
 		}
 
 		m.logger.Debug("creating prometheus counter", zap.String("name", cm.Name), zap.String("help", help))
-		counter := prometheus.NewCounter(prometheus.CounterOpts{
+		counter := prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: cm.Name,
 			Help: help,
-		})
+		}, extractLabelNames(cm.Labels))
 
 		if err := ctx.GetMetricsRegistry().Register(counter); err != nil {
 			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
 				// reuse existing collector
-				counter = are.ExistingCollector.(prometheus.Counter)
+				if counter, ok = are.ExistingCollector.(*prometheus.CounterVec); !ok {
+					return fmt.Errorf("existing collector for %s is not a CounterVec", cm.Name)
+				}
 				m.logger.Info("reusing already registered counter", zap.String("name", cm.Name))
 			} else {
 				m.logger.Error("failed to register counter", zap.String("name", cm.Name), zap.Error(err))
@@ -171,12 +189,29 @@ func isValidMetricName(name string) bool {
 	return metricNameRegex.MatchString(name)
 }
 
+func extractLabelNames(labels []*Label) []string {
+	names := make([]string, len(labels))
+	for i, l := range labels {
+		names[i] = l.Name
+	}
+	return names
+}
+
+func hasPlaceholder(s string) bool {
+	// This is a simple heuristic. A more robust implementation might involve
+	// a more sophisticated parser, but for the common case of checking for
+	// Caddy placeholders like {http.request.method}, this is sufficient.
+	return strings.Contains(s, "{") && strings.Contains(s, "}")
+}
+
 // ServeHTTP evaluates each configured counter and increments those whose
 // matchers (if any) are satisfied by the current request. The next handler
 // in the chain is always invoked first, so metric failures do not block the
 // request.
 func (m MetricInjector) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	err := next.ServeHTTP(w, r)
+
+	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 
 	for _, cm := range m.Counters {
 		// If no matchers configured, treat as match-all
@@ -203,8 +238,23 @@ func (m MetricInjector) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 			continue
 		}
 
-		cm.counter.Inc()
-		m.logger.Debug("incremented counter", zap.String("counter", cm.Name))
+		// Evaluate label values.
+		labelValues := make(prometheus.Labels)
+		for _, l := range cm.Labels {
+			var val string
+			if hasPlaceholder(l.Value) {
+				val = repl.ReplaceAll(l.Value, l.Default)
+			} else {
+				val = l.Value
+			}
+			if val == "" {
+				val = l.Default
+			}
+			labelValues[l.Name] = val
+		}
+
+		cm.counter.With(labelValues).Inc()
+		m.logger.Debug("incremented counter", zap.String("counter", cm.Name), zap.Any("labels", labelValues))
 	}
 
 	return err
