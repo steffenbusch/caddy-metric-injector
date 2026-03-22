@@ -36,6 +36,24 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	return m, nil
 }
 
+// parseMetricLabel parses a label directive from the Caddyfile
+func parseMetricLabel(d *caddyfile.Dispenser) (*Label, error) {
+	args := d.RemainingArgs()
+	if len(args) < 2 {
+		return nil, d.Errf("label requires at least 2 arguments: name and value")
+	}
+	l := new(Label)
+	l.Name = args[0]
+	l.Value = args[1]
+	// Set default value to "-" if not provided
+	if len(args) > 2 {
+		l.Default = args[2]
+	} else {
+		l.Default = "-"
+	}
+	return l, nil
+}
+
 // UnmarshalCaddyfile parses the metric_injector block from the Caddyfile
 func (m *MetricInjector) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -56,18 +74,9 @@ func (m *MetricInjector) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 						}
 						cm.Help = d.Val()
 					case "label":
-						args := d.RemainingArgs()
-						if len(args) < 2 {
-							return d.Errf("label requires at least 2 arguments: name and value")
-						}
-						l := new(Label)
-						l.Name = args[0]
-						l.Value = args[1]
-						// Set default value to "-" if not provided
-						if len(args) > 2 {
-							l.Default = args[2]
-						} else {
-							l.Default = "-"
+						l, err := parseMetricLabel(d)
+						if err != nil {
+							return err
 						}
 						cm.Labels = append(cm.Labels, l)
 					case "match":
@@ -81,6 +90,42 @@ func (m *MetricInjector) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					}
 				}
 				m.Counters = append(m.Counters, cm)
+			case "gauge":
+				gm := new(GaugeMetric)
+				for d.NextBlock(1) {
+					switch d.Val() {
+					case "name":
+						if !d.NextArg() {
+							return d.ArgErr()
+						}
+						gm.Name = d.Val()
+					case "help":
+						if !d.NextArg() {
+							return d.ArgErr()
+						}
+						gm.Help = d.Val()
+					case "value":
+						if !d.NextArg() {
+							return d.ArgErr()
+						}
+						gm.Value = d.Val()
+					case "label":
+						l, err := parseMetricLabel(d)
+						if err != nil {
+							return err
+						}
+						gm.Labels = append(gm.Labels, l)
+					case "match":
+						matcherSet, err := caddyhttp.ParseCaddyfileNestedMatcherSet(d)
+						if err != nil {
+							return err
+						}
+						gm.MatcherSetsRaw = append(gm.MatcherSetsRaw, matcherSet)
+					default:
+						return d.Errf("unknown directive: %s", d.Val())
+					}
+				}
+				m.Gauges = append(m.Gauges, gm)
 			default:
 				return d.Errf("unknown directive: %s", d.Val())
 			}
