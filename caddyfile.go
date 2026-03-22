@@ -55,6 +55,21 @@ func (m *MetricInjector) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 							return d.ArgErr()
 						}
 						cm.Help = d.Val()
+					case "label":
+						args := d.RemainingArgs()
+						if len(args) < 2 {
+							return d.Errf("label requires at least 2 arguments: name and value")
+						}
+						l := new(Label)
+						l.Name = args[0]
+						l.Value = args[1]
+						// Set default value to "-" if not provided
+						if len(args) > 2 {
+							l.Default = args[2]
+						} else {
+							l.Default = "-"
+						}
+						cm.Labels = append(cm.Labels, l)
 					case "match":
 						matcherSet, err := caddyhttp.ParseCaddyfileNestedMatcherSet(d)
 						if err != nil {
