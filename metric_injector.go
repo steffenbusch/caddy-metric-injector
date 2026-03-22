@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -48,8 +49,11 @@ var metricNameRegex = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 // through the standard Prometheus metrics endpoint when the global `metrics`
 // option is enabled.
 type MetricInjector struct {
-	// Counters is the list of metrics that should be tracked.
+	// Counters is the list of counter metrics that should be tracked.
 	Counters []*CounterMetric `json:"counters,omitempty"`
+
+	// Gauges is the list of gauge metrics that should be tracked.
+	Gauges []*GaugeMetric `json:"gauges,omitempty"`
 
 	// logger provides structured logging for the module.
 	// It's initialized in the Provision method and used throughout the module for debug information.
@@ -65,6 +69,34 @@ type Label struct {
 
 	// Default is the value to be used if the placeholder is empty.
 	Default string `json:"default,omitempty"`
+}
+
+type GaugeMetric struct {
+	// Name is the Prometheus metric name. It must be unique within the
+	// module configuration.
+	Name string `json:"name,omitempty"`
+
+	// Help is the help/description string for the metric. A sensible default
+	// is generated if this is left empty.
+	Help string `json:"help,omitempty"`
+
+	// Value is the placeholder for the value to be set.
+	Value string `json:"value,omitempty"`
+
+	// Labels is the list of labels for the metric.
+	Labels []*Label `json:"labels,omitempty"`
+
+	// MatcherSetsRaw holds the raw matcher configuration parsed from Caddyfile /
+	// JSON. It is exercise only during Provision; the concrete matcher sets are
+	// produced from it and stored in matcherSets.
+	MatcherSetsRaw caddyhttp.RawMatcherSets `json:"match,omitempty" caddy:"namespace=http.matchers"`
+
+	// matcherSets contains the compiled matcher sets that are evaluated for each
+	// request. It remains nil when no matchers were configured.
+	matcherSets caddyhttp.MatcherSets
+
+	// gauge is the Prometheus GaugeVec instance used at runtime.
+	gauge *prometheus.GaugeVec
 }
 
 type CounterMetric struct {
@@ -108,12 +140,12 @@ func (MetricInjector) CaddyModule() caddy.ModuleInfo {
 func (m *MetricInjector) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 
-	if len(m.Counters) == 0 {
-		m.logger.Error("no counters configured")
-		return fmt.Errorf("at least one counter must be defined")
+	if len(m.Counters) == 0 && len(m.Gauges) == 0 {
+		m.logger.Error("no counters or gauges configured")
+		return fmt.Errorf("at least one counter or gauge must be defined")
 	}
 
-	m.logger.Info("Provisioning MetricInjector", zap.Int("configured_counters", len(m.Counters)))
+	m.logger.Info("Provisioning MetricInjector", zap.Int("configured_counters", len(m.Counters)), zap.Int("configured_gauges", len(m.Gauges)))
 
 	nameSet := make(map[string]struct{})
 
@@ -181,7 +213,71 @@ func (m *MetricInjector) Provision(ctx caddy.Context) error {
 		}
 	}
 
-	m.logger.Info("MetricInjector provisioned", zap.Int("active_counters", len(m.Counters)))
+	for _, gm := range m.Gauges {
+		if gm.Name == "" {
+			m.logger.Error("gauge name missing", zap.Any("gauge_def", gm))
+			return errors.New("gauge: name is required")
+		}
+
+		if _, exists := nameSet[gm.Name]; exists {
+			m.logger.Error("duplicate gauge name detected", zap.String("name", gm.Name))
+			return fmt.Errorf("duplicate gauge name: %s", gm.Name)
+		}
+
+		if !isValidMetricName(gm.Name) {
+			m.logger.Error("invalid prometheus metric name", zap.String("name", gm.Name))
+			return fmt.Errorf("invalid Prometheus metric name: %s", gm.Name)
+		}
+
+		nameSet[gm.Name] = struct{}{}
+
+		help := gm.Help
+		if help == "" {
+			help = fmt.Sprintf("Gauge for %s", gm.Name)
+		}
+
+		m.logger.Debug("creating prometheus gauge", zap.String("name", gm.Name), zap.String("help", help))
+		gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: gm.Name,
+			Help: help,
+		}, extractLabelNames(gm.Labels))
+
+		if err := ctx.GetMetricsRegistry().Register(gauge); err != nil {
+			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+				// reuse existing collector
+				if gauge, ok = are.ExistingCollector.(*prometheus.GaugeVec); !ok {
+					return fmt.Errorf("existing collector for %s is not a GaugeVec", gm.Name)
+				}
+				m.logger.Info("reusing already registered gauge", zap.String("name", gm.Name))
+			} else {
+				m.logger.Error("failed to register gauge", zap.String("name", gm.Name), zap.Error(err))
+				return err
+			}
+		} else {
+			m.logger.Info("registered gauge with Caddy metrics registry", zap.String("name", gm.Name))
+		}
+
+		gm.gauge = gauge
+
+		if len(gm.MatcherSetsRaw) > 0 {
+			m.logger.Debug("loading matcher sets for gauge", zap.String("name", gm.Name))
+			matcherSets, err := ctx.LoadModule(gm, "MatcherSetsRaw")
+			if err != nil {
+				m.logger.Error("failed to load matcher sets", zap.String("name", gm.Name), zap.Error(err))
+				return err
+			}
+			err = gm.matcherSets.FromInterface(matcherSets)
+			if err != nil {
+				m.logger.Error("failed to parse matcher sets", zap.String("name", gm.Name), zap.Error(err))
+				return err
+			}
+			m.logger.Debug("matcher sets loaded", zap.String("name", gm.Name), zap.Int("matchers", len(gm.matcherSets)))
+		} else {
+			m.logger.Debug("no matcher sets configured for gauge", zap.String("name", gm.Name))
+		}
+	}
+
+	m.logger.Info("MetricInjector provisioned", zap.Int("active_counters", len(m.Counters)), zap.Int("active_gauges", len(m.Gauges)))
 	return nil
 }
 
@@ -255,6 +351,64 @@ func (m MetricInjector) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 
 		cm.counter.With(labelValues).Inc()
 		m.logger.Debug("incremented counter", zap.String("counter", cm.Name), zap.Any("labels", labelValues))
+	}
+
+	for _, gm := range m.Gauges {
+		// If no matchers configured, treat as match-all
+		var matches bool
+		var matchErr error
+
+		if len(gm.matcherSets) == 0 {
+			matches = true
+		} else {
+			matches, matchErr = gm.matcherSets.AnyMatchWithError(r)
+			if matchErr != nil {
+				m.logger.Warn("matcher evaluation error", zap.String("gauge", gm.Name), zap.Error(matchErr))
+				continue
+			}
+		}
+
+		if !matches {
+			m.logger.Debug("request did not match gauge's matchers", zap.String("gauge", gm.Name))
+			continue
+		}
+
+		if gm.gauge == nil {
+			m.logger.Warn("gauge instance is nil, skipping set", zap.String("gauge", gm.Name))
+			continue
+		}
+
+		// Evaluate label values.
+		labelValues := make(prometheus.Labels)
+		for _, l := range gm.Labels {
+			var val string
+			if hasPlaceholder(l.Value) {
+				val = repl.ReplaceAll(l.Value, l.Default)
+			} else {
+				val = l.Value
+			}
+			if val == "" {
+				val = l.Default
+			}
+			labelValues[l.Name] = val
+		}
+
+		// Set the gauge value. If the value placeholder is empty, use the default.
+		var gaugeValue float64
+		if gm.Value == "" {
+			gaugeValue = 0
+		} else {
+			valStr := repl.ReplaceAll(gm.Value, "0")
+			parsedValue, err := strconv.ParseFloat(valStr, 64)
+			if err != nil {
+				m.logger.Warn("failed to parse gauge value", zap.String("gauge", gm.Name), zap.String("value", gm.Value), zap.Error(err))
+				continue
+			}
+			gaugeValue = parsedValue
+		}
+
+		gm.gauge.With(labelValues).Set(gaugeValue)
+		m.logger.Debug("set gauge", zap.String("gauge", gm.Name), zap.Any("labels", labelValues), zap.Float64("value", gaugeValue))
 	}
 
 	return err
