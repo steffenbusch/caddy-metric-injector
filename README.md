@@ -53,7 +53,7 @@ metric_injector {
     counter {
       name <prometheus-metric-name>
       help <help-text>
-      label <label-name> <placeholder> [<default-value>]
+      label <label-name> <value|placeholder> [<default-value>]
       match {
          <any Caddy HTTP request matcher>
       }
@@ -83,8 +83,8 @@ You must either:
 - `help` (optional): Help/description string. A default description is generated if omitted.
 - `label` (optional): Defines a Prometheus label. You can have multiple `label` lines.
   - `<label-name>`: The name of the label.
-  - `<placeholder>`: A Caddy placeholder to resolve the label's value at runtime (e.g., `{http.request.method}`).
-  - `<default-value>` (optional): A fallback value if the placeholder is empty. Defaults to `-`.
+  - `<value>`: The value for the label. This can be a static string or a dynamic Caddy placeholder (e.g., `{http.request.method}`).
+  - `<default-value>` (optional): A fallback value if a placeholder resolves to an empty string. This is ignored if `<value>` is a static string. Defaults to `-`.
 - `match` (optional): Any Caddy HTTP request matcher (path, method, header, vars, etc.). If omitted, the counter increments for every request.
 
 ### Example
@@ -102,6 +102,7 @@ reporting.example.com:8080 {
       name content_security_policy_reports_total
       help "How many CSP reports were received"
       label origin {http.request.header.origin} "unknown"
+      label source "caddy"
       match {
         path /csp/*
       }

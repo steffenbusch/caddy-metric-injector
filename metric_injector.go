@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -196,6 +197,13 @@ func extractLabelNames(labels []*Label) []string {
 	return names
 }
 
+func hasPlaceholder(s string) bool {
+	// This is a simple heuristic. A more robust implementation might involve
+	// a more sophisticated parser, but for the common case of checking for
+	// Caddy placeholders like {http.request.method}, this is sufficient.
+	return strings.Contains(s, "{") && strings.Contains(s, "}")
+}
+
 // ServeHTTP evaluates each configured counter and increments those whose
 // matchers (if any) are satisfied by the current request. The next handler
 // in the chain is always invoked first, so metric failures do not block the
@@ -230,11 +238,15 @@ func (m MetricInjector) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 			continue
 		}
 
-		// Evaluate label values using the replacer.
-		// If a label value is empty after replacement, use the default value.
+		// Evaluate label values.
 		labelValues := make(prometheus.Labels)
 		for _, l := range cm.Labels {
-			val := repl.ReplaceAll(l.Value, l.Default)
+			var val string
+			if hasPlaceholder(l.Value) {
+				val = repl.ReplaceAll(l.Value, l.Default)
+			} else {
+				val = l.Value
+			}
 			if val == "" {
 				val = l.Default
 			}
